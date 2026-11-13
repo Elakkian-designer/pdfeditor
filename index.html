@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Editor</title>
+<meta name="theme-color" content="#0e7c7b">
+<style>
+:root{--ink:#1c2230;--bar:#fff;--bg:#dde2ea;--line:#c5ccd8;--acc:#0e7c7b}
+@media(prefers-color-scheme:dark){:root{--ink:#e8ecf3;--bar:#1b2130;--bg:#10141d;--line:#2d3648;--acc:#2bb3b1}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.4 system-ui,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg);min-height:100vh}
+header{position:sticky;top:0;z-index:20;background:var(--bar);border-bottom:1px solid var(--line);padding:8px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+h1{font-size:16px;margin:0 8px 0 2px}
+button,label.btn,select{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:8px;padding:6px 11px;cursor:pointer}
+select option{color:#000}
+button:hover,label.btn:hover{border-color:var(--acc)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+button.go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button:disabled{opacity:.4;cursor:default}
+.sep{width:1px;height:24px;background:var(--line);margin:0 4px}
+input[type=number]{width:56px;font:inherit;padding:5px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink)}
+input[type=color]{width:34px;height:32px;border:1px solid var(--line);border-radius:8px;padding:2px;background:transparent}
+#hint{padding:6px 12px;font-size:13px;opacity:.75}
+#drop{margin:12vh auto;max-width:440px;text-align:center;padding:36px 24px;border:2px dashed var(--line);border-radius:14px}
+#drop p{margin:6px 0 16px;opacity:.75}
+#pages{padding:14px;display:flex;flex-direction:column;align-items:center;gap:14px}
+.pg{position:relative;box-shadow:0 2px 12px rgba(0,0,0,.25);background:#fff}
+.pg canvas{display:block}
+.layer{position:absolute;inset:0}
+.hit{position:absolute;cursor:text;border-radius:2px;z-index:0}
+body[data-tool=edit] .hit:hover{outline:1.5px solid var(--acc);background:rgba(14,124,123,.12)}
+body:not([data-tool=edit]) .hit{pointer-events:none}
+body[data-tool=add] .layer,body[data-tool=hl] .layer{cursor:crosshair}
+.wo{position:absolute;z-index:1;pointer-events:none}
+.cr{position:absolute;z-index:2;cursor:text}
+.ed{position:absolute;z-index:3;white-space:pre;outline:1.5px dashed var(--acc);outline-offset:1px;min-width:6px}
+.hl{position:absolute;z-index:4;background:rgba(255,226,0,.45);pointer-events:none;mix-blend-mode:multiply}
+#msg{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#222;color:#fff;padding:9px 16px;border-radius:10px;display:none;z-index:50;max-width:90vw}
+</style>
+</head>
+<body data-tool="edit">
+<header id="bar">
+  <h1>PDF Editor</h1>
+  <label class="btn" for="file">Open PDF</label>
+  <input id="file" type="file" accept="application/pdf" hidden>
+  <span class="sep"></span>
+  <button data-tool="edit" class="on">Edit text</button>
+  <button data-tool="add">Add text</button>
+  <button data-tool="hl">Highlight</button>
+  <span class="sep"></span>
+  <select id="fam" aria-label="Font"><option value="h">Sans</option><option value="t">Serif</option><option value="c">Mono</option></select>
+  <button id="bold" aria-label="Bold"><b>B</b></button>
+  <button id="ital" aria-label="Italic"><i>I</i></button>
+  <input id="size" type="number" value="12" min="6" max="96" title="Size for new text" aria-label="Size">
+  <input id="color" type="color" value="#000000" title="Text colour" aria-label="Text colour">
+  <span class="sep"></span>
+  <button id="undo" disabled>Undo</button>
+  <button id="zo" aria-label="Zoom out">−</button>
+  <button id="zi" aria-label="Zoom in">+</button>
+  <button id="save" class="go" disabled>Save PDF</button>
+  <button id="install" hidden>Install app</button>
+</header>
+<div id="hint">Open a PDF, click any text to change it. Your file stays on this device.</div>
+<div id="drop"><strong>Drop a PDF here</strong><p>or choose one to start editing</p><label class="btn" for="file">Open PDF</label></div>
+<main id="pages"></main>
+<div id="msg" role="status"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const $=s=>document.querySelector(s);
+const BASE=1.5;let zoom=1,doc=null,bytes=null,fname='document.pdf',tool='edit';
+let pageInfo=[],saved=new Map(),adds=[],hls=[],hist=[],cur=null;
+const sc=()=>BASE*zoom;
+const CSSF={h:'Helvetica,Arial,sans-serif',t:'"Times New Roman",Times,serif',c:'"Courier New",Courier,monospace'};
+const mc=document.createElement('canvas').getContext('2d');
+const measure=(t,o,size)=>{mc.font=`${o.i?'italic ':''}${o.b?'bold ':''}100px ${CSSF[o.fam]}`;return mc.measureText(t).width*size/100};
+const hex=c=>'#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+const rgbOf=h=>[1,3,5].map(i=>parseInt(h.substr(i,2),16));
+function say(t,ms=3200){const m=$('#msg');m.textContent=t;m.style.display='block';clearTimeout(say.t);say.t=setTimeout(()=>m.style.display='none',ms)}
+function setTool(t){tool=t;document.body.dataset.tool=t;document.querySelectorAll('button[data-tool]').forEach(b=>b.classList.toggle('on',b.dataset.tool==t));
+ $('#hint').textContent={edit:'Click any text to change it. The rest of the line moves automatically.',add:'Click on the page where the new text should go.',hl:'Drag over an area to highlight it.'}[t]}
+document.querySelectorAll('button[data-tool]').forEach(b=>b.onclick=()=>setTool(b.dataset.tool));
+$('#bar').addEventListener('pointerdown',e=>{if(e.target.closest('button,label'))e.preventDefault()});
+const sync=()=>{$('#undo').disabled=!hist.length;$('#save').disabled=!doc};
+
+/* font + colour detection */
+function guess(name,gen){const n=name||'';
+ const b=/bold|black|heavy|semibold|demi/i.test(n),i=/italic|oblique/i.test(n);
+ let fam='h';
+ if(/courier|mono|consol|typewriter/i.test(n)||gen==='monospace')fam='c';
+ else if((/times|serif|georgia|garamond|cambria|minion|palatino|bookman/i.test(n)&&!/sans/i.test(n))||gen==='serif')fam='t';
+ return{fam,b,i}}
+function ensure(it){if(it.bg)return;const P=pageInfo[it.p],S=sc(),x=Math.max(0,it.ox*S),y=Math.max(0,(it.base-it.size)*S),w=Math.max(2,Math.min(it.ow*S,P.cv.width-x)),h=Math.max(2,it.size*1.2*S);
+ try{const g=P.cv.getContext('2d'),bp=g.getImageData(Math.max(0,x-3),Math.max(0,(it.base-it.size*.4)*S),1,1).data;it.bg=[bp[0],bp[1],bp[2]];
+  const d=g.getImageData(x,y,w,Math.min(h,P.cv.height-y)).data;let best=0,c=[0,0,0];
+  for(let k=0;k<d.length;k+=4){const dist=Math.abs(d[k]-it.bg[0])+Math.abs(d[k+1]-it.bg[1])+Math.abs(d[k+2]-it.bg[2]);if(dist>best){best=dist;c=[d[k],d[k+1],d[k+2]]}}
+  it.color=best>90?c:[0,0,0]}catch(e){it.bg=[255,255,255];it.color=[0,0,0]}}
+
+/* loading + rendering */
+async function load(f){
+ if(!f||(f.type!=='application/pdf'&&!/\.pdf$/i.test(f.name)))return say('Choose a PDF file.');
+ try{fname=f.name;bytes=new Uint8Array(await f.arrayBuffer());
+  doc=await pdfjsLib.getDocument({data:bytes.slice()}).promise;
+  saved=new Map();adds=[];hls=[];hist=[];$('#drop').style.display='none';
+  await render();setTool('edit');sync();
+ }catch(e){say(e&&e.name==='PasswordException'?'This PDF is password-protected. Remove the password first.':'Could not open this PDF.')}}
+$('#file').onchange=e=>load(e.target.files[0]);
+addEventListener('dragover',e=>e.preventDefault());
+addEventListener('drop',e=>{e.preventDefault();load(e.dataTransfer.files[0])});
+
+async function render(){
+ const host=$('#pages');host.innerHTML='';pageInfo=[];saved.forEach(e=>e.el=null);adds.forEach(a=>a.el=null);
+ let anyText=false,rotated=false;
+ for(let i=0;i<doc.numPages;i++){
+  const page=await doc.getPage(i+1),vp=page.getViewport({scale:sc()});
+  const box=document.createElement('div');box.className='pg';box.style.width=vp.width+'px';box.style.height=vp.height+'px';
+  const cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
+  const layer=document.createElement('div');layer.className='layer';box.append(cv,layer);host.append(box);
+  await page.render({canvasContext:cv.getContext('2d',{willReadFrequently:true}),viewport:vp}).promise;
+  const P={i,cv,layer,items:[],W:vp.width/sc(),rot:page.rotate};pageInfo.push(P);if(page.rotate)rotated=true;
+  const tc=await page.getTextContent();
+  for(const t0 of tc.items){
+   if(!t0.str.trim())continue;anyText=true;
+   const t=pdfjsLib.Util.transform(vp.transform,t0.transform);
+   const size=Math.hypot(t[2],t[3])/sc(),ox=t[4]/sc(),base=t[5]/sc();
+   let nm='';try{nm=page.commonObjs.get(t0.fontName).name}catch(e){}
+   const it={p:i,ox,base,ow:t0.width,size,text0:t0.str,shift:0,...guess(nm,(tc.styles[t0.fontName]||{}).fontFamily),key:`${i}|${ox.toFixed(1)}|${base.toFixed(1)}`};
+   const h=document.createElement('div');h.className='hit';
+   h.style.cssText=`left:${ox*sc()}px;top:${(base-size*.95)*sc()}px;width:${it.ow*sc()}px;height:${size*1.2*sc()}px`;
+   h.onclick=ev=>{ev.stopPropagation();if(tool==='edit')startEdit(it)};
+   it.hit=h;layer.append(h);P.items.push(it);
+  }
+  segments(P.items);
+  layer.addEventListener('pointerdown',ev=>layerDown(ev,i));
+ }
+ for(const P of pageInfo)for(const it of P.items){it.ed=saved.get(it.key)||null;if(it.ed)it.ed.it=it}
+ const done=new Set();
+ for(const P of pageInfo)for(const it of P.items)if(it.ed&&!done.has(it.seg)){done.add(it.seg);layout(it.seg)}
+ adds.forEach(mountAdd);hls.forEach(mountHl);
+ if(!anyText)say('No selectable text found. This looks like a scanned PDF (OCR is not supported yet).',6000);
+ else if(rotated)say('Rotated pages cannot be saved with edits yet.',6000);
+}
+
+/* group items that sit on one line and close together into "segments" that move as a unit */
+function segments(items){
+ const s=[...items].sort((a,b)=>a.base-b.base||a.ox-b.ox),lines=[];let ln=null;
+ for(const o of s){if(!ln||Math.abs(o.base-ln[0].base)>o.size*.5){ln=[];lines.push(ln)}ln.push(o)}
+ for(const l of lines){l.sort((a,b)=>a.ox-b.ox);let sg=null,prev=null;
+  for(const o of l){if(!sg||o.ox-(prev.ox+prev.ow)>o.size*2.2)sg=[];sg.push(o);o.seg=sg;prev=o}}
+}
+const active=it=>it.ed&&(it.ed.text!==it.text0||it.ed.fam!==it.fam||it.ed.b!==it.b||it.ed.i!==it.i);
+function layout(seg){
+ let cum=0;
+ for(const it of seg){
+  it.shift=Math.abs(cum)<.05?0:cum;
+  if(active(it)){it.ed.w=measure(it.ed.text,it.ed,it.size);cum+=it.ed.w-it.ow}
+  paint(it);
+ }
+ const last=seg[seg.length-1];
+ if(last&&cumEnd(seg)>pageInfo[last.p].W-8)say('This line now runs past the page edge. Shorten the text or lower the font size.',4500);
+}
+const cumEnd=seg=>{const l=seg[seg.length-1];return l.ox+l.shift+(active(l)?l.ed.w:l.ow)};
+
+function paint(it){
+ const P=pageInfo[it.p],L=P.layer,S=sc(),moved=it.ed||it.shift;
+ if(moved)ensure(it);
+ const top=(it.base-it.size*.95)*S,h=it.size*1.25*S;
+ if(moved&&!it.wo){const d=document.createElement('div');d.className='wo';
+  d.style.cssText=`left:${(it.ox-1)*S}px;top:${top}px;width:${(it.ow+2)*S}px;height:${h}px;background:rgb(${it.bg})`;L.append(d);it.wo=d}
+ if(!moved&&it.wo){it.wo.remove();it.wo=null}
+ it.hit.style.display=moved?'none':'';
+ if(!it.ed&&it.shift){ /* neighbour pushed along: copy its original pixels so it keeps its own font */
+  if(!it.cr){const c=document.createElement('canvas'),w=Math.ceil((it.ow+2)*S),hh=Math.ceil(h);c.className='cr';c.width=w;c.height=hh;
+   c.getContext('2d').drawImage(P.cv,(it.ox-1)*S,top,w,hh,0,0,w,hh);
+   c.style.cssText=`top:${top}px;width:${w}px;height:${hh}px`;c.onclick=()=>{if(tool==='edit')startEdit(it)};L.append(c);it.cr=c}
+  it.cr.style.left=(it.ox-1+it.shift)*S+'px';
+ }else if(it.cr){it.cr.remove();it.cr=null}
+ if(it.ed){if(!it.ed.el)mkEl(it.ed,L,it.ox,it.base,it.size,it.bg,it);it.ed.el.style.left=(it.ox+it.shift)*S+'px'}
+}
+
+/* text boxes */
+function mkEl(o,L,x,base,size,bg,it){
+ const d=document.createElement('div');d.className='ed';
+ try{d.contentEditable='plaintext-only'}catch(e){}
+ if(d.contentEditable!=='plaintext-only')d.contentEditable='true';
+ d.spellcheck=false;d.textContent=o.text;o.el=d;const S=sc();
+ d.style.cssText+=`left:${x*S}px;top:${(base-size*.95)*S}px;font-size:${size*S}px;line-height:${size*1.2*S}px`;
+ if(bg)d.style.background=`rgb(${bg})`;
+ styleEl(o);
+ d.onpointerdown=e=>e.stopPropagation();
+ d.onfocus=()=>{cur=o;ctl(o)};
+ d.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();d.blur()}};
+ d.oninput=()=>{o.text=d.innerText.replace(/\n/g,'');if(it)layout(it.seg)};
+ d.onblur=e=>{if(e.relatedTarget&&$('#bar').contains(e.relatedTarget))return;
+  if(it){if(it.ed&&!active(it))removeEd(it)}else if(!o.text.trim()){killAdd(o)}};
+ L.append(d);return d;
+}
+function styleEl(o){const s=o.el.style;s.fontFamily=CSSF[o.fam];s.fontWeight=o.b?700:400;s.fontStyle=o.i?'italic':'normal';s.color=`rgb(${o.color})`}
+function ctl(o){$('#fam').value=o.fam;$('#bold').classList.toggle('on',!!o.b);$('#ital').classList.toggle('on',!!o.i);$('#color').value=hex(o.color)}
+function restyle(o){if(!o||!o.el||!o.el.isConnected)return;styleEl(o);if(o.it)layout(o.it.seg)}
+$('#fam').onchange=e=>{if(cur){cur.fam=e.target.value;restyle(cur)}};
+$('#bold').onclick=e=>{e.currentTarget.classList.toggle('on');if(cur){cur.b=e.currentTarget.classList.contains('on');restyle(cur)}};
+$('#ital').onclick=e=>{e.currentTarget.classList.toggle('on');if(cur){cur.i=e.currentTarget.classList.contains('on');restyle(cur)}};
+$('#color').oninput=e=>{if(cur){cur.color=rgbOf(e.target.value);restyle(cur)}};
+
+function sweep(){for(const P of pageInfo)for(const it of P.items)if(it.ed&&!active(it)&&document.activeElement!==it.ed.el)removeEd(it)}
+function startEdit(it){
+ sweep();
+ if(it.ed){it.ed.el.focus();return}
+ ensure(it);
+ it.ed={text:it.text0,fam:it.fam,b:it.b,i:it.i,color:it.color,it};
+ saved.set(it.key,it.ed);hist.push({k:'e',key:it.key});
+ layout(it.seg);const el=it.ed.el;el.focus();
+ const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r);sync();
+}
+function removeEd(it){if(!it.ed)return;const e=it.ed;e.el&&e.el.remove();saved.delete(it.key);it.ed=null;if(cur===e)cur=null;
+ hist=hist.filter(h=>h.key!==it.key);layout(it.seg);sync()}
+
+function mountAdd(a){const P=pageInfo[a.p];mkEl(a,P.layer,a.x,a.base,a.size,null,null)}
+function killAdd(a){a.el&&a.el.remove();adds=adds.filter(x=>x!==a);hist=hist.filter(h=>h.o!==a);if(cur===a)cur=null;sync()}
+function mountHl(h){const d=document.createElement('div');d.className='hl';
+ d.style.cssText=`left:${h.x*sc()}px;top:${h.y*sc()}px;width:${h.w*sc()}px;height:${h.h*sc()}px`;h.el=d;pageInfo[h.p].layer.append(d)}
+
+function layerDown(ev,pi){
+ if(ev.target!==pageInfo[pi].layer&&!ev.target.classList.contains('hit'))return;
+ const r=pageInfo[pi].layer.getBoundingClientRect(),x=(ev.clientX-r.left)/sc(),y=(ev.clientY-r.top)/sc();
+ if(tool==='add'){
+  const size=+$('#size').value||12;
+  const a={p:pi,x,base:y+size*.4,size,text:'New text',fam:$('#fam').value,b:$('#bold').classList.contains('on'),i:$('#ital').classList.contains('on'),color:rgbOf($('#color').value)};
+  adds.push(a);hist.push({k:'a',o:a});mountAdd(a);a.el.focus();
+  const rg=document.createRange();rg.selectNodeContents(a.el);const s=getSelection();s.removeAllRanges();s.addRange(rg);sync();ev.preventDefault();
+ }else if(tool==='hl'){
+  const h={p:pi,x,y,w:0,h:0};mountHl(h);
+  const mv=m=>{const X=(m.clientX-r.left)/sc(),Y=(m.clientY-r.top)/sc();h.x=Math.min(x,X);h.y=Math.min(y,Y);h.w=Math.abs(X-x);h.h=Math.abs(Y-y);
+   h.el.style.cssText=`left:${h.x*sc()}px;top:${h.y*sc()}px;width:${h.w*sc()}px;height:${h.h*sc()}px`};
+  const up=()=>{removeEventListener('pointermove',mv);removeEventListener('pointerup',up);
+   if(h.w<3||h.h<3)h.el.remove();else{hls.push(h);hist.push({k:'h',o:h});sync()}};
+  addEventListener('pointermove',mv);addEventListener('pointerup',up);ev.preventDefault();
+ }else sweep();
+}
+
+$('#undo').onclick=()=>{const a=hist.pop();if(!a)return;
+ if(a.k==='e'){for(const P of pageInfo){const it=P.items.find(x=>x.key===a.key);if(it){hist.push(a);removeEd(it);break}}}
+ else if(a.k==='a'){killAdd(a.o)}else{hls=hls.filter(x=>x!==a.o);a.o.el&&a.o.el.remove()}sync()};
+async function zoomTo(z){if(!doc)return;zoom=Math.min(3,Math.max(.5,z));await render()}
+$('#zi').onclick=()=>zoomTo(zoom+.25);$('#zo').onclick=()=>zoomTo(zoom-.25);
+
+/* ---------- Export ---------- */
+const FONT_URL={
+ ta:'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansTamil/hinted/ttf/NotoSansTamil-Regular.ttf',
+ u:'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf'};
+const STD={h:['Helvetica','HelveticaBold','HelveticaOblique','HelveticaBoldOblique'],t:['TimesRoman','TimesRomanBold','TimesRomanItalic','TimesRomanBoldItalic'],c:['Courier','CourierBold','CourierOblique','CourierBoldOblique']};
+async function save(){
+ const {PDFDocument,StandardFonts,rgb}=PDFLib;sweep();
+ try{
+  say('Preparing PDF…',8000);
+  const out=await PDFDocument.load(bytes,{ignoreEncryption:true}),src=await PDFDocument.load(bytes,{ignoreEncryption:true});
+  out.registerFontkit(fontkit);const cache={};
+  async function fontFor(o){
+   const t=o.text,k=/[\u0B80-\u0BFF]/.test(t)?'ta':/[^\u0000-\u00ff]/.test(t)?'u':null;
+   if(k){if(!cache[k]){const buf=await (await fetch(FONT_URL[k])).arrayBuffer();cache[k]=await out.embedFont(buf,{subset:false})}return cache[k]}
+   const n=STD[o.fam][o.b?(o.i?3:1):(o.i?2:0)];if(!cache[n])cache[n]=await out.embedFont(StandardFonts[n]);return cache[n];
+  }
+  const pages=out.getPages(),srcPages=src.getPages(),col=c=>rgb(c[0]/255,c[1]/255,c[2]/255);
+  for(const h of hls){const pg=pages[h.p],H=pg.getHeight();pg.drawRectangle({x:h.x,y:H-h.y-h.h,width:h.w,height:h.h,color:rgb(1,.9,0),opacity:.45})}
+  for(const P of pageInfo){
+   if(P.rot)continue;const pg=pages[P.i],H=pg.getHeight();
+   const moved=P.items.filter(it=>active(it)||it.shift);
+   for(const it of moved){ensure(it);pg.drawRectangle({x:it.ox-1.5,y:H-it.base-it.size*.28,width:it.ow+3,height:it.size*1.28,color:col(it.bg)})} /* pass 1: cover old text */
+   for(const it of moved){
+    if(active(it)){
+     if(it.ed.text.trim())pg.drawText(it.ed.text,{x:it.ox+it.shift,y:H-it.base,size:it.size,font:await fontFor(it.ed),color:col(it.ed.color)});
+    }else{ /* untouched neighbour: reuse the original vector content so its font is exact */
+     const left=Math.max(0,it.ox-1),bottom=Math.max(0,H-it.base-it.size*.3),right=Math.min(pg.getWidth(),it.ox+it.ow+1),top=Math.min(H,H-it.base+it.size*.95);
+     try{const ep=await out.embedPage(srcPages[P.i],{left,bottom,right,top});pg.drawPage(ep,{x:left+it.shift,y:bottom})}
+     catch(e){pg.drawText(it.text0,{x:it.ox+it.shift,y:H-it.base,size:it.size,font:await fontFor({text:it.text0,fam:it.fam,b:it.b,i:it.i}),color:col(it.color||[0,0,0])})}
+    }
+   }
+  }
+  for(const a of adds){const pg=pages[a.p],H=pg.getHeight();
+   if(a.text.trim())pg.drawText(a.text,{x:a.x,y:H-a.base,size:a.size,font:await fontFor(a),color:col(a.color)})}
+  const blob=new Blob([await out.save()],{type:'application/pdf'}),l=document.createElement('a');
+  l.href=URL.createObjectURL(blob);l.download='edited-'+fname;l.click();setTimeout(()=>URL.revokeObjectURL(l.href),4000);say('Saved edited-'+fname);
+ }catch(err){console.error(err);say('Could not save. Tamil and Unicode text needs internet the first time.',6000)}
+}
+$('#save').onclick=save;
+
+/* ---------- PWA ---------- */
+(function(){
+ const c=document.createElement('canvas');c.width=c.height=512;const x=c.getContext('2d');
+ x.fillStyle='#0e7c7b';x.fillRect(0,0,512,512);x.fillStyle='#fff';x.font='bold 300px system-ui';x.textAlign='center';x.fillText('Aa',256,340);
+ const man={name:'PDF Editor',short_name:'PDF Editor',start_url:location.pathname,display:'standalone',background_color:'#0e7c7b',theme_color:'#0e7c7b',icons:[{src:c.toDataURL('image/png'),sizes:'512x512',type:'image/png'}]};
+ const l=document.createElement('link');l.rel='manifest';l.href=URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'}));document.head.append(l);
+})();
+let dp;addEventListener('beforeinstallprompt',e=>{e.preventDefault();dp=e;$('#install').hidden=false});
+$('#install').onclick=async()=>{if(!dp)return;dp.prompt();await dp.userChoice;dp=null;$('#install').hidden=true};
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
